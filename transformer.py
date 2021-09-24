@@ -137,32 +137,41 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, size, dropout, num_heads):
+    def __init__(self, size, dropout, num_heads, encoder_attention=True):
         """
 
         :param size: model size and embedding layer dimension. Need to be divisible by num_heads
         :param dropout: dropout probability
         :param num_heads: number of heads for multi head attention.
+        :param encoder_attention: bool. Does the decoder contain attention block for encoder decoder attention?
         """
         super().__init__()
+        self.encoder_attention = encoder_attention
+
         self.attn_masked = MultiHeadAttention(num_heads=num_heads,
                                               model_size=size,
                                               p_dropout=dropout,
                                               masked=True)
         self.add_norm1 = AddNormLayer(size, dropout)
-        self.attn = MultiHeadAttention(num_heads=num_heads,
-                                       model_size=size,
-                                       p_dropout=dropout,
-                                       masked=False)
-        self.add_norm2 = AddNormLayer(size, dropout)
+
+        if self.encoder_attention:
+            self.attn = MultiHeadAttention(num_heads=num_heads,
+                                           model_size=size,
+                                           p_dropout=dropout,
+                                           masked=False)
+            self.add_norm2 = AddNormLayer(size, dropout)
+
         self.ff = PositionwiseFeedForward(size, size*4)
         self.add_norm3 = AddNormLayer(size, dropout)
 
-    def forward(self, y, encoder_output):
+    def forward(self, y, encoder_output=None):
         decoder_self_attn, _ = self.attn_masked(y, y, y)
         y1 = self.add_norm1(y, decoder_self_attn)
-        encoder_decoder_attn, _ = self.attn(y1, encoder_output, encoder_output)
-        y2 = self.add_norm2(y1, encoder_decoder_attn)
+        if self.encoder_attention:
+            encoder_decoder_attn, _ = self.attn(y1, encoder_output, encoder_output)
+            y2 = self.add_norm2(y1, encoder_decoder_attn)
+        else:
+            y2 = y1
         y3 = self.add_norm3(y2, self.ff(y2))
         return y3
 
@@ -173,10 +182,10 @@ class ScaleDotProductAttention(nn.Module):
     """
     def __init__(self, input_dim, output_dim, dropout):
         super().__init__()
-        # linear layers to store trainable weights for query, key and value. Just linear transform and no bias
-        self.query_fc = nn.Linear(in_features=input_dim, out_features=output_dim, bias=False)
-        self.key_fc = nn.Linear(in_features=input_dim, out_features=output_dim, bias=False)
-        self.value_fc = nn.Linear(in_features=input_dim, out_features=output_dim, bias=False)
+        # linear layers to store trainable weights for query, key and value. add bias here as well
+        self.query_fc = nn.Linear(in_features=input_dim, out_features=output_dim, bias=True)
+        self.key_fc = nn.Linear(in_features=input_dim, out_features=output_dim, bias=True)
+        self.value_fc = nn.Linear(in_features=input_dim, out_features=output_dim, bias=True)
         self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, query, key, value, mask=None):
@@ -250,14 +259,17 @@ class PositionalEncoding(nn.Module):
         denominator = torch.exp(torch.arange(0, embedding_size, 2) *
                                 (-math.log(10000.0)) / embedding_size)
         pe[:, 0::2] = torch.sin(position * denominator)
-        pe[:, 1::2] = torch.cos(position * denominator)
+        # we need to handle the case where embedding_size is odd
+        if embedding_size % 2 == 1:
+            pe[:, 1::2] = torch.cos(position * denominator[:-1])
+        else:
+            pe[:, 1::2] = torch.cos(position * denominator)
+
         pe = pe.unsqueeze(0)
         # not a model parameter but part of the model state
         self.register_buffer('pe', pe)
 
     def forward(self, x):
-        # TODO:
-        # x = x + torch.tensor(self.pe[:, :x.size(1)], requires_grad=False)
         x = x + self.pe[:, :x.size(1)]
         return self.dropout(x)
 

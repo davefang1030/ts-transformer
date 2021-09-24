@@ -17,6 +17,7 @@ class ModelTrainer(object):
         self.optimizer = optimizer
         self.scheduler = scheduler
         self._is_notebook = False
+        self.train_state = None
         try:
             self._is_notebook = True if get_ipython() else False
         except NameError:
@@ -30,7 +31,7 @@ class ModelTrainer(object):
         :param mask_index:
         :return:
         """
-        train_state = self.make_train_state(args)
+        self.train_state = self.make_train_state(args)
         if self._is_notebook:
             epoch_bar = tqdm_notebook(desc='training routine', total=args.num_epochs, position=0)
         else:
@@ -57,7 +58,7 @@ class ModelTrainer(object):
 
         try:
             for epoch_index in range(args.num_epochs):
-                train_state['epoch_index'] = epoch_index
+                self.train_state['epoch_index'] = epoch_index
 
                 # training set
                 dataset.set_split('train')
@@ -83,8 +84,8 @@ class ModelTrainer(object):
                     train_bar.set_postfix(loss=running_loss, acc=running_acc, epoch=epoch_index)
                     train_bar.update()
 
-                train_state['train_loss'].append(running_loss)
-                train_state['train_acc'].append(running_acc)
+                self.train_state['train_loss'].append(running_loss)
+                self.train_state['train_acc'].append(running_acc)
 
                 # valuation set
                 dataset.set_split('val')
@@ -104,16 +105,16 @@ class ModelTrainer(object):
                     val_bar.set_postfix(loss=running_loss, acc=running_acc, epoch=epoch_index)
                     val_bar.update()
 
-                train_state['val_loss'].append(running_loss)
-                train_state['val_acc'].append(running_acc)
+                self.train_state['val_loss'].append(running_loss)
+                self.train_state['val_acc'].append(running_acc)
 
-                # update train_state
-                train_state = self.update_train_state(args=args, train_state=train_state)
+                # update self.train_state
+                self.update_train_state(args=args)
 
                 # update learning rate
-                self.scheduler.step(train_state['val_loss'][-1])
+                self.scheduler.step(self.train_state['val_loss'][-1])
 
-                if train_state['stop_early']:
+                if self.train_state['stop_early']:
                     break
 
                 train_bar.n = 0
@@ -123,7 +124,7 @@ class ModelTrainer(object):
         except KeyboardInterrupt:
             print("Existing training")
 
-        return train_state
+        return self.train_state
 
     def eval(self, dataset, args, split='test', mask_index=-1):
         """
@@ -188,58 +189,59 @@ class ModelTrainer(object):
         """
         raise NotImplementedError
 
-    def update_train_state(self, args, train_state):
+    def update_train_state(self, args):
         """Handle the training state updates.
         Components:
          - Early Stopping: Prevent overfitting.
          - Model Checkpoint: Model is saved if the model is better
         :param args: main arguments
-        :param train_state: a dictionary representing the training state values
-        :returns: a new train_state
+        :param self.train_state: a dictionary representing the training state values
+        :returns: a new self.train_state
         """
         # Save one model at least
-        if train_state['epoch_index'] == 0:
-            torch.save(self.model.state_dict(), train_state['model_filename'])
-            train_state['stop_early'] = False
+        if self.train_state['epoch_index'] == 0:
+            torch.save(self.model.state_dict(), self.train_state['model_filename'])
+            self.train_state['stop_early'] = False
 
         # Save model if performance improved
-        elif train_state['epoch_index'] >= 1:
-            loss_tm1, loss_t = train_state['val_loss'][-2:]
+        elif self.train_state['epoch_index'] >= 1:
+            loss_tm1, loss_t = self.train_state['val_loss'][-2:]
 
             # If loss worsened
             if loss_t >= loss_tm1:
                 # Update step
-                train_state['early_stopping_step'] += 1
+                self.train_state['early_stopping_step'] += 1
             # Loss decreased
             else:
                 # Save the best model
-                if loss_t < train_state['early_stopping_best_val']:
-                    torch.save(self.model.state_dict(), train_state['model_filename'])
-                    train_state['early_stopping_best_val'] = loss_t
+                if loss_t < self.train_state['early_stopping_best_val']:
+                    torch.save(self.model.state_dict(), self.train_state['model_filename'])
+                    self.train_state['early_stopping_best_val'] = loss_t
 
                 # Reset early stopping step
-                train_state['early_stopping_step'] = 0
+                self.train_state['early_stopping_step'] = 0
 
             # Stop early ?
-            train_state['stop_early'] = \
-                train_state['early_stopping_step'] >= args.early_stopping_criteria
+            self.train_state['stop_early'] = \
+                self.train_state['early_stopping_step'] >= args.early_stopping_criteria
 
-        return train_state
+        return self.train_state
 
     def make_train_state(self, args):
-        train_state = {'stop_early': False,
-                       'early_stopping_step': 0,
-                       'early_stopping_best_val': 1e8,
-                       'learning_rate': args.learning_rate,
-                       'epoch_index': 0,
-                       'train_loss': [],
-                       'train_acc': [],
-                       'val_loss': [],
-                       'val_acc': [],
-                       'test_loss': -1,
-                       'test_acc': -1,
-                       'model_filename': args.model_state_file}
-        return train_state
+        self.train_state = {'stop_early': False,
+                            'early_stopping_step': 0,
+                            'early_stopping_best_val': 1e8,
+                            'learning_rate': args.learning_rate,
+                            'epoch_index': 0,
+                            'train_loss': [],
+                            'train_acc': [],
+                            'val_loss': [],
+                            'val_acc': [],
+                            'test_loss': -1,
+                            'test_acc': -1,
+                            'model_filename': args.model_state_file,
+                            'total_epoch': args.num_epochs}
+        return self.train_state
 
     @staticmethod
     def set_seed_everywhere(seed, cuda):

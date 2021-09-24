@@ -4,8 +4,10 @@ import os
 from argparse import Namespace
 from trainer import ModelTrainer, sequence_loss, normalize_sizes, calc_accuracy
 import pandas as pd
-from transformer import Transformer
-from stocks import StockDataset
+from time_series_transformer import TimeSeriesGPT
+from stocks import StockDatasetGPT
+import math
+from sklearn.preprocessing import MinMaxScaler
 
 
 class StockTransformerTrainer(ModelTrainer):
@@ -15,7 +17,7 @@ class StockTransformerTrainer(ModelTrainer):
 
     def forward_pass(self, batch_dict):
         return self.model(x_source=batch_dict['x_source'],
-                          target_sequence=batch_dict['y_target'])
+                          target_sequence=batch_dict['y_input'])
 
     def calculate_loss(self, y_pred, batch_dict, mask_index):
         return self.lossfunc(y_pred, batch_dict['y_target'])
@@ -31,21 +33,49 @@ class StockTransformerTrainer(ModelTrainer):
         return 0
 
 
+class StockGPTTrainer(ModelTrainer):
+    def __init__(self, model, optimizer, scheduler):
+        super().__init__(model, optimizer, scheduler)
+        self.lossfunc = torch.nn.MSELoss()
+
+    def forward_pass(self, batch_dict):
+        return self.model(target_input_sequence=batch_dict['y_input'],
+                          target_sequence=batch_dict['y_target'],
+                          teacher_forcing_prob_threshold=self._calc_teacher_forcing_threshold())
+
+    def calculate_loss(self, y_pred, batch_dict, mask_index):
+        return self.lossfunc(y_pred, batch_dict['y_target'])
+
+    def compute_accuracy(self, y_pred, batch_dict, mask_index):
+        """
+        For MSELoss, there is no accuracy to calculate and always return 0
+        :param y_pred:
+        :param batch_dict:
+        :param mask_index:
+        :return:
+        """
+        return 0
+
+    def _calc_teacher_forcing_threshold(self):
+        k = 20.0
+        return k / (k + math.exp(self.train_state['epoch_index'] / k))
+
+
 if __name__ == "__main__":
-    args = Namespace(dataset_csv="sector_etf.csv",
-                     model_state_file="transform_ts_model.pth",
-                     save_dir="model_storage/stock/ts_transformer",
+    args = Namespace(dataset_csv="sector_etf_logchg.csv",
+                     model_state_file="transform_ts_model_pcharm.pth",
+                     save_dir="model_storage/stock/",
                      reload_from_files=True,
                      expand_filepaths_to_save_dir=True,
                      cuda=True,
                      seed=1337,
                      learning_rate=5e-4,
-                     batch_size=128,
-                     num_epochs=100,
+                     batch_size=64,
+                     num_epochs=300,
                      num_encoder_layer=3,
                      num_decoder_layer=3,
-                     num_attn_heads=2,
-                     model_size=8,
+                     num_attn_heads=4,
+                     model_size=48,
                      dropout=0.1,
                      early_stopping_criteria=5,
                      catch_keyboard_interrupt=True)
@@ -69,25 +99,37 @@ if __name__ == "__main__":
     ModelTrainer.handle_dirs(args.save_dir)
 
     # create dataset
-    dataset = StockDataset(pd.read_csv(args.dataset_csv),
-                           lookback_window=20,
-                           forward_window=5)
+    src_cols = ['XLF']
+    tgt_cols = ['XLF']
 
-    model = Transformer(model_size=args.model_size,
-                        num_encoder=args.num_encoder_layer,
-                        num_decoder=args.num_decoder_layer,
-                        encoder_dropout=args.dropout,
-                        decoder_dropout=args.dropout,
-                        encoder_num_attn_heads=args.num_attn_heads,
-                        decoder_num_attn_heads=args.num_attn_heads,
-                        source_embedding_layer=False,
-                        target_embedding_layer=False)
+    df = pd.read_csv(args.dataset_csv)
+    scaler = MinMaxScaler()
+    df2 = scaler.fit_transform(df.iloc[:, 1:-1])
+    df.iloc[:, 1:-1] = df2
 
-    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+    dataset = StockDatasetGPT(df,
+                              lookback_window=20,
+                              forward_window=5,
+                              src_cols=['XLF'],
+                              tgt_cols=['XLF'])
+
+    model = TimeSeriesGPT(input_size=len(src_cols),
+                          model_size=args.model_size,
+                          output_size=len(tgt_cols),
+                          num_decoder=args.num_decoder_layer,
+                          decoder_dropout=args.dropout,
+                          decoder_num_attn_heads=args.num_attn_heads,
+                          forward_window=5)
+
+    optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
                                                      mode='min', factor=0.5,
                                                      patience=1)
 
-    trainer = StockTransformerTrainer(model, optimizer, scheduler)
+    trainer = StockGPTTrainer(model, optimizer, scheduler)
     train_state = trainer.train(dataset=dataset, args=args)
     print("training finished: ", train_state)
+
+    # save model
+    torch.save(model.state_dict(), args.model_state_file)
+
