@@ -81,17 +81,15 @@ class TimeSeriesTransformer(nn.Module):
 
 class TimeSeriesGPT(nn.Module):
     def __init__(self, input_size, model_size, output_size, num_decoder, decoder_dropout,
-                 decoder_num_attn_heads, forward_window):
+                 decoder_num_attn_heads):
         """
 
         :param model_size: model size is basically the embedding size which is similar to the hidden state
         :param num_decoder: number of decoders in the stack
         :param decoder_dropout: dropout for decoder side
         :param decoder_num_attn_heads: number of attention heads for decoder multi head attention
-        :param forward_window: projection period
         """
         super().__init__()
-        self.forward_window = forward_window
 
         # decoder side
         self.target_fc = nn.Linear(in_features=input_size,
@@ -105,30 +103,32 @@ class TimeSeriesGPT(nn.Module):
         self.fc = nn.Linear(in_features=model_size,
                             out_features=output_size)
 
-    def forward(self, target_input_sequence, target_sequence, teacher_forcing_prob_threshold=0.0):
+    def forward(self, sequence, teacher_forcing_prob_threshold=0.0):
         """
-        :param target_input_sequence: target input sequence to feed the decoder side
-        :param target_sequence: target
+        :param sequence: target sequence are used as input and target. Input is [:-1] and target is [1:]
         :param teacher_forcing_prob_threshold: probability threshold for teacher forcing. default 0 means no teacher forcing
         :return:
         """
-        y = target_input_sequence
-        for step in range(self.forward_window):
+        # start with the first element in the time series
+        y = sequence[:, 0, :].unsqueeze(1)
+        for step in range(sequence.size()[1] - 1):
             output = self.target_fc(y)
-            output = self.target_pos(output)
+            # if we are generating one item a time, do we really need positional encoding?
+            # output = self.target_pos(output)
             for i in range(len(self.stacked_decoders)):
                 output = self.stacked_decoders[i](output)
             output = self.fc(output)
 
-            # use the last sequence
+            # use the last sequence as prediction for next element in time series
             pred = output[:, -1, :].unsqueeze(1)
-            if self.teacher_forcing(teacher_forcing_prob_threshold) and (step < self.forward_window - 1):
-                # pick from the target
-                y = torch.cat((y[:, 1:, :], target_sequence[:, step, :].unsqueeze(1)), dim=1)
+            if self.teacher_forcing(teacher_forcing_prob_threshold):
+                # pick from the target. don't forget to use detach()
+                y = torch.cat((y.detach(), sequence[:, step + 1, :].unsqueeze(1).detach()), dim=1)
             else:
-                y = torch.cat((y[:, 1:, :], pred), dim=1)
+                y = torch.cat((y.detach(), pred.detach()), dim=1)
 
-        return y[:, -self.forward_window:, :]
+        # return a sequence that is shifted to the right
+        return output
 
     def teacher_forcing(self, prob_threshold):
         return random.random() < prob_threshold
