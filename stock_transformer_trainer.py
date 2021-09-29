@@ -137,8 +137,8 @@ if __name__ == "__main__":
 
     import numpy as np
     dataset.set_split('test')
-    x_source = np.zeros((len(dataset._target_df), len(src_cols)))
-    pred = np.zeros((len(dataset._target_df), len(tgt_cols)))
+    x_source = np.zeros((len(dataset)+args.lookback_window, len(src_cols)))
+    pred = np.zeros((len(dataset)+args.lookback_window+args.forward_window, len(tgt_cols)))
     # generate input one at a time and no shuffle to keep the time order
     batch_generator = dataset.generate_batches(dataset, batch_size=1, shuffle=False, device=args.device)
     for batch_index, batch_dict in enumerate(batch_generator):
