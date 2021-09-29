@@ -2,22 +2,22 @@ import torch
 import torch.optim as optim
 import os
 from argparse import Namespace
-from trainer import ModelTrainer, sequence_loss, normalize_sizes, calc_accuracy
+from trainer import ModelTrainer
 import pandas as pd
-from time_series_transformer import TimeSeriesGPT
-from stocks import StockDatasetGPT
+from time_series_transformer import TimeSeriesGPT, TimeSeriesTransformer
+from stocks import StockDatasetGPT, StockDataset
 import math
-from sklearn.preprocessing import MinMaxScaler
 
 
 class StockTransformerTrainer(ModelTrainer):
+    """ transformer time series trainer """
     def __init__(self, model, optimizer, scheduler):
         super().__init__(model, optimizer, scheduler)
         self.lossfunc = torch.nn.MSELoss()
 
     def forward_pass(self, batch_dict):
         return self.model(x_source=batch_dict['x_source'],
-                          target_sequence=batch_dict['y_input'])
+                          target_input_sequence=batch_dict['y_input'])
 
     def calculate_loss(self, y_pred, batch_dict, mask_index):
         return self.lossfunc(y_pred, batch_dict['y_target'])
@@ -34,6 +34,7 @@ class StockTransformerTrainer(ModelTrainer):
 
 
 class StockGPTTrainer(ModelTrainer):
+    """ Decoder only time series trainer """
     def __init__(self, model, optimizer, scheduler):
         super().__init__(model, optimizer, scheduler)
         self.lossfunc = torch.nn.MSELoss()
@@ -64,21 +65,23 @@ class StockGPTTrainer(ModelTrainer):
 
 if __name__ == "__main__":
     args = Namespace(dataset_csv="sector_etf.csv",
-                     model_state_file="transform_ts_model_pcharm.pth",
+                     model_state_file="transform_ts_model.pth",
                      save_dir="model_storage/stock/",
                      reload_from_files=True,
                      expand_filepaths_to_save_dir=True,
                      cuda=True,
                      seed=1337,
-                     learning_rate=5e-4,
+                     learning_rate=1e-4,
                      batch_size=64,
                      num_epochs=20,
-                     num_encoder_layer=5,
-                     num_decoder_layer=5,
-                     num_attn_heads=3,
-                     model_size=48,
-                     dropout=0.1,
-                     early_stopping_criteria=100,
+                     num_encoder_layer=12,
+                     num_decoder_layer=4,
+                     num_attn_heads=4,
+                     model_size=64,
+                     dropout=0.2,
+                     early_stopping_criteria=10,
+                     forward_window=5,
+                     lookback_window=50,
                      sequence_length=10,
                      catch_keyboard_interrupt=True)
 
@@ -94,61 +97,66 @@ if __name__ == "__main__":
     args.device = torch.device("cuda" if args.cuda else "cpu")
     print("Using CUDA: {}".format(args.cuda))
 
-    # Set seed for reproducibility
-    ModelTrainer.set_seed_everywhere(args.seed, args.cuda)
-
-    # handle dirs
-    ModelTrainer.handle_dirs(args.save_dir)
-
     # create dataset
-    src_cols = ['XLF']
-    tgt_cols = ['XLF']
+    src_cols = ['XLF', 'XLE', 'XLK']
+    tgt_cols = ['XLF', 'XLE', 'XLK']
 
     df = pd.read_csv(args.dataset_csv)
-    scaler = MinMaxScaler()
-    df2 = scaler.fit_transform(df.iloc[:, 1:-1])
-    df.iloc[:, 1:-1] = df2
+    dataset = StockDataset(df,
+                           lookback_window=args.lookback_window,
+                           forward_window=args.forward_window,
+                           src_cols=src_cols,
+                           tgt_cols=tgt_cols)
 
-    dataset = StockDatasetGPT(df,
-                              sequence_length=args.sequence_length,
-                              src_cols=['XLF'],
-                              tgt_cols=['XLF'])
-
-    model = TimeSeriesGPT(input_size=len(src_cols),
-                          model_size=args.model_size,
-                          output_size=len(tgt_cols),
-                          num_decoder=args.num_decoder_layer,
-                          decoder_dropout=args.dropout,
-                          decoder_num_attn_heads=args.num_attn_heads)
+    model = TimeSeriesTransformer(input_size=len(src_cols),
+                                  model_size=args.model_size,
+                                  output_size=len(tgt_cols),
+                                  num_encoder=args.num_encoder_layer,
+                                  num_decoder=args.num_decoder_layer,
+                                  encoder_dropout=args.dropout,
+                                  decoder_dropout=args.dropout,
+                                  encoder_num_attn_heads=args.num_attn_heads,
+                                  decoder_num_attn_heads=args.num_attn_heads,
+                                  forward_window=args.forward_window)
 
     optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
                                                      mode='min', factor=0.5,
                                                      patience=1)
 
-    trainer = StockGPTTrainer(model, optimizer, scheduler)
+    trainer = StockTransformerTrainer(model, optimizer, scheduler)
+    # Set seed for reproducibility
+    trainer.set_seed_everywhere(args.seed, args.cuda)
+    trainer.handle_dirs(args.save_dir)
+
     train_state = trainer.train(dataset=dataset, args=args)
-    print("training finished: ", train_state)
+    print("\ntraining finished: ", train_state)
 
     # save model
-    torch.save(model.state_dict(), args.model_state_file)
+    # torch.save(model.state_dict(), args.model_state_file)
 
     import numpy as np
-    test_df = dataset.test_df
-    x_input = np.array(test_df.iloc[60:-20, 3]).astype(np.float32)
-    y_pred = np.zeros(len(x_input))
-    y_pred[:args.sequence_length] = np.nan
-    for i in range(len(x_input) - 30):
-        target_input = torch.tensor(x_input[i:i + args.sequence_length]).unsqueeze(1).unsqueeze(0).to(
-            torch.device("cuda"))
-        x_out = model(sequence=target_input,
-                      teacher_forcing_prob_threshold=0.0)
-        #print(x_out)
-        y_pred[i + args.sequence_length] = x_out.squeeze().detach().cpu().numpy()[-1]
+    dataset.set_split('test')
+    x_source = np.zeros((len(dataset._target_df), len(src_cols)))
+    pred = np.zeros((len(dataset._target_df), len(tgt_cols)))
+    # generate input one at a time and no shuffle to keep the time order
+    batch_generator = dataset.generate_batches(dataset, batch_size=1, shuffle=False, device=args.device)
+    for batch_index, batch_dict in enumerate(batch_generator):
+        x_input = batch_dict['x_source']
+        y_input = batch_dict['y_input']
+        y_target = batch_dict['y_target']
+        # forecast
+        x_out = model.forecast(x_source=x_input, target_seed=y_input[:, 0, :].unsqueeze(1))
+        x_source[batch_index:batch_index+args.lookback_window, :] = x_input.detach().cpu().numpy()
+        pred[batch_index+args.lookback_window:batch_index+args.lookback_window+args.forward_window] = \
+            x_out.detach().cpu().numpy()
+
     print("plotting...")
     import matplotlib.pyplot as plt
-    plt.figure(figsize=(10, 5))
-    plt.plot(x_input, label='x_input')
-    plt.plot(y_pred, label='y_pred')
-    plt.show()
-
+    for i in range(len(tgt_cols)):
+        plt.figure(figsize=(10, 5))
+        plt.title(tgt_cols[i])
+        plt.plot(x_source[:, i], label='history')
+        plt.plot(pred[:, i], label='prediction')
+        plt.legend(loc="upper left")
+        plt.show()

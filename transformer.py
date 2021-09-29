@@ -5,94 +5,6 @@ import torch.nn.functional as F
 import numpy as np
 
 
-class Transformer(nn.Module):
-    """ Transformer network architecture for both seq2seq and time series """
-    def __init__(self, model_size, num_encoder, num_decoder, encoder_dropout, decoder_dropout,
-                 encoder_num_attn_heads, decoder_num_attn_heads,
-                 source_embedding_layer=False, source_emb_size=0,
-                 target_embedding_layer=False, target_emb_size=0):
-        """
-
-        :param model_size: model size would be the same for embedding size for both encoder and decoder
-        :param num_encoder: number of encoders in the stack
-        :param num_decoder: number of decoders in the stack
-        :param encoder_dropout: dropout for encoder side
-        :param decoder_dropout: dropout for decoder side
-        :param encoder_num_attn_heads: number of attention heads for encoder multi head attention
-        :param decoder_num_attn_heads: number of attention heads for decoder multi head attention
-        :param source_embedding_layer: bool, for time series set to false as there is no need for embedding layer
-        :param source_emb_size: source vocabulary size
-        :param target_embedding_layer: bool, for time series set to false as there is no need for embedding layer
-        :param target_emb_size: target vocabulary size
-        """
-        super().__init__()
-
-        # encoder side
-        if source_embedding_layer:
-            self.source_emb = nn.Embedding(num_embeddings=source_emb_size,
-                                           embedding_dim=model_size)
-        else:
-            self.source_emb = None
-
-        self.source_pos = PositionalEncoding(embedding_size=model_size,
-                                             dropout=encoder_dropout)
-        # use ModuleList to ensure modules inside are properly registered and visible
-        self.stacked_encoders = nn.ModuleList([Encoder(size=model_size,
-                                                       dropout=encoder_dropout,
-                                                       num_heads=encoder_num_attn_heads) for _ in range(num_encoder)])
-
-        # decoder side
-        if target_embedding_layer:
-            self.target_emb = nn.Embedding(num_embeddings=target_emb_size,
-                                           embedding_dim=model_size)
-        else:
-            self.target_emb = None
-
-        self.target_pos = PositionalEncoding(embedding_size=model_size,
-                                             dropout=decoder_dropout)
-        self.stacked_decoders = nn.ModuleList([Decoder(size=model_size,
-                                                       dropout=decoder_dropout,
-                                                       num_heads=decoder_num_attn_heads) for _ in range(num_decoder)])
-
-        # if no embedding layer then there is no need for the last full connected layer
-        if target_embedding_layer:
-            self.fc = nn.Linear(in_features=model_size,
-                                out_features=target_emb_size)
-        else:
-            self.fc = None
-
-    def forward(self, x_source, target_sequence, apply_softmax=False):
-        """
-
-        :param x_source:
-        :param target_sequence:
-        :param apply_softmax:
-        :return:
-        """
-        x = x_source
-        if self.source_emb is not None:
-            x = self.source_emb(x)
-        x = self.source_pos(x)
-        for i in range(len(self.stacked_encoders)):
-            x = self.stacked_encoders[i](x)
-
-        y = target_sequence
-        if self.target_emb is not None:
-            y = self.target_emb(y)
-        y = self.target_pos(y)
-        for i in range(len(self.stacked_decoders)):
-            y = self.stacked_decoders[i](y, x)
-
-        if self.fc is not None:
-            output = self.fc(y)
-            if apply_softmax:
-                output = F.softmax(output, dim=1)
-        else:
-            output = y
-
-        return output
-
-
 class AddNormLayer(nn.Module):
     """
     Residual & Normalization
@@ -125,7 +37,7 @@ class Encoder(nn.Module):
                                        model_size=size,
                                        p_dropout=dropout)
         self.add_norm1 = AddNormLayer(size, dropout)
-        # not sure if hidden_size is 4 times model_size is more a heurestic
+        # hidden_size is 4 times model_size seems to be more a heurestic
         self.ff = PositionwiseFeedForward(size, 4*size)
         self.add_norm2 = AddNormLayer(size, dropout)
 
@@ -288,6 +200,5 @@ class PositionwiseFeedForward(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        # return self.w_2(self.dropout(F.relu(self.w_1(x))))
-        return self.w_2(self.dropout(F.tanh(self.w_1(x))))
-
+        # return self.w_2(self.dropout(F.tanh(self.w_1(x))))
+        return self.w_2(self.dropout(F.relu(self.w_1(x))))
