@@ -40,8 +40,12 @@ class StockDataset(PdTorchDataset):
         df1 = self.test_scaler.fit_transform(self.test_df.iloc[:, 1:-1])
         self.test_df.iloc[:, 1:-1] = df1
 
+        self.scaler_dict = {'train': self.train_scaler,
+                            'val': self.val_scaler,
+                            'test': self.test_scaler}
+
     def __len__(self):
-        # override base and return dataframe size minus lookback_window and forward_window
+        # override base and return dataframe size minus sequence_length
         return len(self._target_df) - self.lookback_window - self.forward_window
 
     def __getitem__(self, index):
@@ -63,6 +67,33 @@ class StockDataset(PdTorchDataset):
         return {"x_source": x_source,
                 "y_input": y_input,
                 "y_target": y_target}
+
+    def inverse_transform(self, cols, data):
+        """
+        inverse transform the data to original space
+        :param cols: list of column names
+        :param data: ndarray
+        :return: data scaled back using scaler inverse_transform()
+        """
+        num_cols = len(self._target_df.columns)
+        num_rows = data.shape[0]
+        # set up a matrix without date and split column which has 2 less columns
+        data1 = np.zeros((num_rows, num_cols - 2))
+        # deduct one from the index as date column is the first one
+        index = [self._target_df.columns.get_loc(c) - 1 for c in cols]
+        data1[:, index] = data
+        inverse = self._target_scaler.inverse_transform(data1)
+        return inverse[:, index]
+
+    def set_split(self, split="train"):
+        """ override base to provide correct scaler and size """
+        super().set_split(split)
+        try:
+            self._target_size = len(self) - self.lookback_window - self.forward_window
+            self._target_scaler = self.scaler_dict[split]
+        except:
+            # set_split is called before the attributes are created, ignore
+            pass
 
 
 class StockDatasetGPT(PdTorchDataset):
@@ -86,6 +117,21 @@ class StockDatasetGPT(PdTorchDataset):
         self.sequence_length = sequence_length
         self.src_cols = src_cols
 
+        self.train_scaler = MinMaxScaler(feature_range=(-1, 1))
+        self.val_scaler = MinMaxScaler(feature_range=(-1, 1))
+        self.test_scaler = MinMaxScaler(feature_range=(-1, 1))
+        # scale the data and ignore first column (date) and last column (split)
+        df1 = self.train_scaler.fit_transform(self.train_df.iloc[:, 1:-1])
+        self.train_df.iloc[:, 1:-1] = df1
+        df1 = self.val_scaler.fit_transform(self.val_df.iloc[:, 1:-1])
+        self.val_df.iloc[:, 1:-1] = df1
+        df1 = self.test_scaler.fit_transform(self.test_df.iloc[:, 1:-1])
+        self.test_df.iloc[:, 1:-1] = df1
+
+        self.scaler_dict = {'train': self.train_scaler,
+                            'val': self.val_scaler,
+                            'test': self.test_scaler}
+
     def __len__(self):
         # override base and return dataframe size minus sequence_length
         return len(self._target_df) - self.sequence_length
@@ -99,3 +145,30 @@ class StockDatasetGPT(PdTorchDataset):
         y_input = df1.loc[:, self.src_cols].to_numpy().astype(np.float32)
 
         return {"y_input": y_input}
+
+    def inverse_transform(self, cols, data):
+        """
+        inverse transform the data to original space
+        :param cols: list of column names
+        :param data: ndarray
+        :return: data scaled back using scaler inverse_transform()
+        """
+        num_cols = len(self._target_df.columns)
+        num_rows = data.shape[0]
+        # set up a matrix without date and split column which has 2 less columns
+        data1 = np.zeros((num_rows, num_cols - 2))
+        # deduct one from the index as date column is the first one
+        index = [self._target_df.columns.get_loc(c) - 1 for c in cols]
+        data1[:, index] = data
+        inverse = self._target_scaler.inverse_transform(data1)
+        return inverse[:, index]
+
+    def set_split(self, split="train"):
+        """ override base to provide correct dataframe and size """
+        super().set_split(split)
+        try:
+            self._target_size = len(self) - self.lookback_window - self.forward_window
+            self._target_scaler = self.scaler_dict[split]
+        except:
+            # set_split is called before the attributes are created, ignore
+            pass
