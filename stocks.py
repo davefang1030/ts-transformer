@@ -167,7 +167,7 @@ class StockDatasetGPT(PdTorchDataset):
         """ override base to provide correct dataframe and size """
         super().set_split(split)
         try:
-            self._target_size = len(self) - self.lookback_window - self.forward_window
+            self._target_size = len(self) - self.sequence_length
             self._target_scaler = self.scaler_dict[split]
         except:
             # set_split is called before the attributes are created, ignore
