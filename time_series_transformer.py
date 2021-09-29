@@ -81,7 +81,7 @@ class TimeSeriesTransformer(nn.Module):
             x = self.stacked_encoders[i](x)
 
         y = target_seed
-        output2 = None
+        _, y_seq_len, _ = y.size()
         for step in range(self.forward_window):
             output = self.target_fc(y)
             output = self.target_pos(output)
@@ -92,16 +92,15 @@ class TimeSeriesTransformer(nn.Module):
             # use the last sequence and append to the end of input
             next_element = output[:, -1, :].unsqueeze(1)
             y = torch.cat((y.detach(), next_element.detach()), dim=1)
-            # output2 would be what decoder first predicted at each step.
-            # output would be what is predicted at last step. the first predicted element are decoded again so they
-            # would be different than what is predicted at the last step.
-            if step == 0:
-                output2 = next_element
-            else:
-                output2 = torch.cat((output2.detach(), next_element.detach()), dim=1)
 
-        # return output2
-        return output
+        # output2 would be what decoder first predicted at each step.  output would be what is predicted at last step.
+        # The first predicted element are decoded again so they would be different than what is predicted at the last
+        # step. output2 seems to be more logical choice based on the autoregressive nature of decoding. But why not use
+        # output which has more decoder iterations for the first few elements
+        output2 = y[:, y_seq_len:, :]
+
+        return output2
+        # return output
 
 
 class TimeSeriesGPT(nn.Module):
